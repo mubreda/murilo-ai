@@ -1,0 +1,38 @@
+{
+  "root": true,
+  "ignorePatterns": ["projects/**/*"],
+  "overrides": [
+    {
+      "files": ["*.ts"],
+      "parserOptions": {
+        "project": ["tsconfig.app.json"],
+        "tsconfigRootDir": "./"
+      },
+      "extends": [
+        "plugin:@angular-eslint/recommended",
+        "plugin:@angular-eslint/template/process-inline-templates",
+        "plugin:prettier/recommended"
+      ],
+      "rules": {
+        "@angular-eslint/component-class-suffix": "off",
+        "@angular-eslint/directive-class-suffix": "off",
+        "@angular-eslint/no-empty-lifecycle-method": "off",
+        "prettier/prettier": [
+          "error",
+          {
+            "singleQuote": true,
+            "printWidth": 100,
+            "trailingComma": "es5",
+            "bracketSpacing": true,
+            "arrowParens": "always"
+          }
+        ]
+      }
+    },
+    {
+      "files": ["*.html"],
+      "extends": ["plugin:@angular-eslint/template/recommended", "plugin:prettier/recommended"],
+      "rules": {}
+    }
+  ]
+}

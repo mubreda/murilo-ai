@@ -18,3 +18,25 @@ build/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Python virtual environments
+.venv/
+**/.venv/
+
+# Python cache
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.*
+
+# Local AI artifacts
+src/ai/output/
+src/ai/models/
+
+# Official AI repositories
+src/ai/codeformer/CodeFormer/
+src/ai/realesrgan/Real-ESRGAN/
