@@ -11,6 +11,7 @@ namespace MuriloAI.Backend.Tests.Integration;
 public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 {
     private readonly WebApplicationFactory<Program> _factory;
+    private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(5);
 
     public ImageProcessingEndpointTests(WebApplicationFactory<Program> factory)
     {
@@ -20,6 +21,8 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
     [Fact]
     public async Task Process_ReturnsProcessedFile_WhenRequestIsValid()
     {
+        FakeEngineGateway.Reset();
+
         using var factory = _factory.WithWebHostBuilder(builder =>
         {
             builder.ConfigureTestServices(services =>
@@ -44,7 +47,13 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("image/png", response.Content.Headers.ContentType?.MediaType);
+        Assert.NotNull(response.Content.Headers.ContentDisposition);
+        Assert.False(string.IsNullOrWhiteSpace(response.Content.Headers.ContentDisposition?.FileNameStar ?? response.Content.Headers.ContentDisposition?.FileName));
         Assert.NotEmpty(responseBytes);
+
+        Assert.NotNull(FakeEngineGateway.LastOutputPath);
+        var deleted = await WaitUntilDeleted(FakeEngineGateway.LastOutputPath!, CleanupTimeout);
+        Assert.True(deleted, "Expected response temp output file to be removed after response completion.");
     }
 
     [Fact]
@@ -79,11 +88,27 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
 
     private sealed class FakeEngineGateway : IEngineGateway
     {
+        private static readonly object Sync = new();
+        public static string? LastOutputPath { get; private set; }
+
+        public static void Reset()
+        {
+            lock (Sync)
+            {
+                LastOutputPath = null;
+            }
+        }
+
         public async Task<EngineProcessResult> ProcessAsync(EngineProcessRequest request, CancellationToken cancellationToken = default)
         {
             Directory.CreateDirectory(request.OutputDirectory);
             var outputPath = Path.Combine(request.OutputDirectory, "output.png");
             await File.WriteAllBytesAsync(outputPath, [137, 80, 78, 71], cancellationToken);
+
+            lock (Sync)
+            {
+                LastOutputPath = outputPath;
+            }
 
             return new EngineProcessResult(
                 Success: true,
@@ -94,5 +119,21 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
                 ExitCode: 0,
                 Message: "ok");
         }
+    }
+
+    private static async Task<bool> WaitUntilDeleted(string path, TimeSpan timeout)
+    {
+        var endAt = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow <= endAt)
+        {
+            if (!File.Exists(path))
+            {
+                return true;
+            }
+
+            await Task.Delay(50);
+        }
+
+        return !File.Exists(path);
     }
 }

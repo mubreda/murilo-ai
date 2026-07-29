@@ -39,13 +39,26 @@ public sealed class ImageProcessingController : ControllerBase
                 correlationId),
             cancellationToken);
 
-        if (result.Success &&
-            result.OutputPath is not null &&
-            result.ContentType is not null &&
-            result.OutputFileName is not null)
+        if (result.Success && result.OutputPath is not null)
         {
+            if (!System.IO.File.Exists(result.OutputPath))
+            {
+                var missingOutputProblem = new ProblemDetails
+                {
+                    Status = StatusCodes.Status500InternalServerError,
+                    Title = "Image processing failed",
+                    Detail = "Processed file was not found.",
+                    Instance = HttpContext.Request.Path
+                };
+                missingOutputProblem.Extensions["correlationId"] = result.CorrelationId;
+                return StatusCode(StatusCodes.Status500InternalServerError, missingOutputProblem);
+            }
+
+            var contentType = ResolveContentType(result.ContentType, result.OutputPath);
+            var downloadName = ResolveDownloadName(result.OutputFileName, result.OutputPath);
+
             RegisterCleanupOnCompleted(result.OutputPath);
-            return PhysicalFile(result.OutputPath, result.ContentType, result.OutputFileName);
+            return PhysicalFile(result.OutputPath, contentType, downloadName);
         }
 
         var problem = new ProblemDetails
@@ -58,6 +71,39 @@ public sealed class ImageProcessingController : ControllerBase
         problem.Extensions["correlationId"] = result.CorrelationId;
 
         return StatusCode(result.StatusCode, problem);
+    }
+
+    private static string ResolveContentType(string? contentType, string outputPath)
+    {
+        if (!string.IsNullOrWhiteSpace(contentType))
+        {
+            return contentType;
+        }
+
+        var extension = Path.GetExtension(outputPath).ToLowerInvariant();
+        return extension switch
+        {
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            ".webp" => "image/webp",
+            _ => "application/octet-stream"
+        };
+    }
+
+    private static string ResolveDownloadName(string? outputFileName, string outputPath)
+    {
+        if (!string.IsNullOrWhiteSpace(outputFileName))
+        {
+            return outputFileName;
+        }
+
+        var extension = Path.GetExtension(outputPath);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            extension = ".bin";
+        }
+
+        return $"processed-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}{extension}";
     }
 
     private void RegisterCleanupOnCompleted(string outputPath)
