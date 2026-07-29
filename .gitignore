@@ -44,6 +44,8 @@ src/ai/realesrgan/Real-ESRGAN/
 # .NET build artifacts
 src/backend/bin/
 src/backend/obj/
+src/backend.Tests/bin/
+src/backend.Tests/obj/
 
 # Local runner temp files
 src/ai/.tmp_stdout.txt

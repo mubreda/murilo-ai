@@ -7,5 +7,6 @@ public class EngineResult
     public string? InputPath { get; set; }
     public string? OutputPath { get; set; }
     public double Duration { get; set; }
+    public int? ExitCode { get; set; }
     public string? Message { get; set; }
 }

@@ -48,7 +48,7 @@ public class PythonEngineRunner
             arguments.Add(optionsJson);
         }
 
-        startInfo.ArgumentList.Add("run_engine.py");
+        startInfo.ArgumentList.Add(pythonScript);
         startInfo.ArgumentList.Add(engineName);
         startInfo.ArgumentList.Add(inputPath);
         startInfo.ArgumentList.Add(outputPath);
@@ -140,6 +140,7 @@ public class PythonEngineRunner
                 Engine = engineName,
                 InputPath = inputPath,
                 OutputPath = outputPath,
+                ExitCode = process.ExitCode,
                 Message = stderr.Trim()
             };
         }
@@ -151,12 +152,18 @@ public class PythonEngineRunner
                 PropertyNameCaseInsensitive = true
             });
 
+            if (result is not null)
+            {
+                result.ExitCode = process.ExitCode;
+            }
+
             return result ?? new EngineResult
             {
                 Success = false,
                 Engine = engineName,
                 InputPath = inputPath,
                 OutputPath = outputPath,
+                ExitCode = process.ExitCode,
                 Message = "Resposta do Python não foi reconhecida."
             };
         }
@@ -168,6 +175,7 @@ public class PythonEngineRunner
                 Engine = engineName,
                 InputPath = inputPath,
                 OutputPath = outputPath,
+                ExitCode = process.ExitCode,
                 Message = $"Falha ao desserializar resposta do Python: {ex.Message}"
             };
         }
