@@ -32,7 +32,9 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
 
         var inputFile = command.File!;
         var extension = Path.GetExtension(inputFile.FileName);
-        var tempRoot = Path.Combine(Path.GetTempPath(), "murilo-ai", command.CorrelationId);
+        var safeCorrelationId = BuildSafeCorrelationId(command.CorrelationId);
+        var requestDirectory = $"{safeCorrelationId}-{Guid.NewGuid():N}";
+        var tempRoot = Path.Combine(Path.GetTempPath(), "murilo-ai", requestDirectory);
         var inputDirectory = Path.Combine(tempRoot, "input");
         var outputDirectory = Path.Combine(tempRoot, "output");
         Directory.CreateDirectory(inputDirectory);
@@ -210,5 +212,26 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
         {
             // Best-effort cleanup: temporary files must not crash the request flow.
         }
+    }
+
+    private static string BuildSafeCorrelationId(string? correlationId)
+    {
+        if (string.IsNullOrWhiteSpace(correlationId))
+        {
+            return Guid.NewGuid().ToString("N");
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        var sanitizedChars = correlationId
+            .Select(ch => invalidChars.Contains(ch) ? '_' : ch)
+            .ToArray();
+        var sanitized = new string(sanitizedChars).Trim();
+
+        if (string.IsNullOrWhiteSpace(sanitized) || sanitized.All(ch => ch == '_'))
+        {
+            return Guid.NewGuid().ToString("N");
+        }
+
+        return sanitized;
     }
 }

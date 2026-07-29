@@ -62,6 +62,44 @@ public class ProcessImageWithEngineUseCaseTests
         gateway.Verify(x => x.ProcessAsync(It.IsAny<EngineProcessRequest>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Fact]
+    public async Task ExecuteAsync_DoesNotThrowIOException_WhenCorrelationIdHasInvalidPathChars()
+    {
+        var gateway = new Mock<IEngineGateway>();
+        var useCase = new ProcessImageWithEngineUseCase(gateway.Object, NullLogger<ProcessImageWithEngineUseCase>.Instance);
+
+        var outputDir = Path.Combine(Path.GetTempPath(), "murilo-ai-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDir);
+        var outputFile = Path.Combine(outputDir, "result.png");
+        await File.WriteAllBytesAsync(outputFile, [137, 80, 78, 71]);
+
+        EngineProcessRequest? capturedRequest = null;
+        gateway
+            .Setup(x => x.ProcessAsync(It.IsAny<EngineProcessRequest>(), It.IsAny<CancellationToken>()))
+            .Callback<EngineProcessRequest, CancellationToken>((request, _) => capturedRequest = request)
+            .ReturnsAsync((EngineProcessRequest req, CancellationToken _) =>
+                new EngineProcessResult(true, req.Engine, req.InputPath, outputFile, 0.10, 0, "ok"));
+
+        var command = new ProcessImageWithEngineCommand(
+            CreateFormFile("test.png", [1, 2, 3, 4]),
+            "realesrgan",
+            "{\"tile\":128}",
+            "0HNNDMHRGPA3F:00000001\\bad?*");
+
+        var result = await useCase.ExecuteAsync(command, CancellationToken.None);
+
+        Assert.True(result.Success);
+        Assert.Equal(StatusCodes.Status200OK, result.StatusCode);
+        Assert.NotNull(capturedRequest);
+
+        var requestDirectory = Directory.GetParent(Directory.GetParent(capturedRequest!.InputPath)!.FullName)!.Name;
+        Assert.DoesNotContain(':', requestDirectory);
+        Assert.DoesNotContain('\\', requestDirectory);
+        Assert.DoesNotContain('/', requestDirectory);
+        Assert.DoesNotContain('?', requestDirectory);
+        Assert.DoesNotContain('*', requestDirectory);
+    }
+
     private static IFormFile CreateFormFile(string fileName, byte[] bytes)
     {
         var stream = new MemoryStream(bytes);
