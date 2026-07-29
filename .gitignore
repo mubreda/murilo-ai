@@ -40,3 +40,11 @@ src/ai/models/
 # Official AI repositories
 src/ai/codeformer/CodeFormer/
 src/ai/realesrgan/Real-ESRGAN/
+
+# .NET build artifacts
+src/backend/bin/
+src/backend/obj/
+
+# Local runner temp files
+src/ai/.tmp_stdout.txt
+src/ai/.tmp_stderr.txt

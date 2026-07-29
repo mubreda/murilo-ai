@@ -14,6 +14,7 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddHttpClient<IImageEngine, FalImageEngine>();
+builder.Services.AddSingleton<PythonEngineRunner>();
 builder.Services.AddSingleton<IImageEnhancementService, ImageEnhancementService>();
 
 var app = builder.Build();
