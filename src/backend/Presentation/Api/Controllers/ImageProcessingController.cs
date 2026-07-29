@@ -25,17 +25,27 @@ public sealed class ImageProcessingController : ControllerBase
             correlationId = Guid.NewGuid().ToString("N");
         }
 
+        var formFile = request.File;
+        await using var inputStream = formFile?.OpenReadStream();
+
         var result = await _useCase.ExecuteAsync(
             new ProcessImageWithEngineCommand(
-                request.File,
+                formFile?.FileName ?? string.Empty,
+                formFile?.ContentType,
+                inputStream ?? Stream.Null,
+                formFile?.Length ?? 0,
                 request.Engine,
                 request.Options,
                 correlationId),
             cancellationToken);
 
-        if (result.Success && result.FileBytes is not null && result.ContentType is not null && result.OutputFileName is not null)
+        if (result.Success &&
+            result.OutputPath is not null &&
+            result.ContentType is not null &&
+            result.OutputFileName is not null)
         {
-            return File(result.FileBytes, result.ContentType, result.OutputFileName);
+            RegisterCleanupOnCompleted(result.OutputPath);
+            return PhysicalFile(result.OutputPath, result.ContentType, result.OutputFileName);
         }
 
         var problem = new ProblemDetails
@@ -48,5 +58,31 @@ public sealed class ImageProcessingController : ControllerBase
         problem.Extensions["correlationId"] = result.CorrelationId;
 
         return StatusCode(result.StatusCode, problem);
+    }
+
+    private void RegisterCleanupOnCompleted(string outputPath)
+    {
+        HttpContext.Response.OnCompleted(() =>
+        {
+            try
+            {
+                if (System.IO.File.Exists(outputPath))
+                {
+                    System.IO.File.Delete(outputPath);
+                }
+
+                var parentDirectory = Path.GetDirectoryName(outputPath);
+                if (!string.IsNullOrWhiteSpace(parentDirectory) && Directory.Exists(parentDirectory))
+                {
+                    Directory.Delete(parentDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+
+            return Task.CompletedTask;
+        });
     }
 }

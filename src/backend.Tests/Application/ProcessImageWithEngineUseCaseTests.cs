@@ -1,4 +1,3 @@
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using MuriloAI.Backend.Application.UseCases.ProcessImageWithEngine;
@@ -26,7 +25,10 @@ public class ProcessImageWithEngineUseCaseTests
                 new EngineProcessResult(true, req.Engine, req.InputPath, outputFile, 0.12, 0, "ok"));
 
         var command = new ProcessImageWithEngineCommand(
-            CreateFormFile("test.png", [1, 2, 3, 4]),
+            "test.png",
+            "image/png",
+            CreateInputStream([1, 2, 3, 4]),
+            4,
             "realesrgan",
             "{\"tile\":128}",
             Guid.NewGuid().ToString("N"));
@@ -34,11 +36,22 @@ public class ProcessImageWithEngineUseCaseTests
         var result = await useCase.ExecuteAsync(command, CancellationToken.None);
 
         Assert.True(result.Success);
-        Assert.Equal(StatusCodes.Status200OK, result.StatusCode);
-        Assert.NotNull(result.FileBytes);
+        Assert.Equal(200, result.StatusCode);
+        Assert.NotNull(result.OutputPath);
+        Assert.True(File.Exists(result.OutputPath));
         Assert.Equal("image/png", result.ContentType);
 
         gateway.Verify(x => x.ProcessAsync(It.IsAny<EngineProcessRequest>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        if (result.OutputPath is not null)
+        {
+            File.Delete(result.OutputPath);
+            var parent = Path.GetDirectoryName(result.OutputPath);
+            if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent))
+            {
+                Directory.Delete(parent, true);
+            }
+        }
 
         Directory.Delete(outputDir, true);
     }
@@ -50,7 +63,10 @@ public class ProcessImageWithEngineUseCaseTests
         var useCase = new ProcessImageWithEngineUseCase(gateway.Object, NullLogger<ProcessImageWithEngineUseCase>.Instance);
 
         var command = new ProcessImageWithEngineCommand(
-            CreateFormFile("test.png", [1, 2, 3, 4]),
+            "test.png",
+            "image/png",
+            CreateInputStream([1, 2, 3, 4]),
+            4,
             "realesrgan",
             "not-json",
             Guid.NewGuid().ToString("N"));
@@ -58,7 +74,7 @@ public class ProcessImageWithEngineUseCaseTests
         var result = await useCase.ExecuteAsync(command, CancellationToken.None);
 
         Assert.False(result.Success);
-        Assert.Equal(StatusCodes.Status400BadRequest, result.StatusCode);
+        Assert.Equal(400, result.StatusCode);
         gateway.Verify(x => x.ProcessAsync(It.IsAny<EngineProcessRequest>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -81,7 +97,10 @@ public class ProcessImageWithEngineUseCaseTests
                 new EngineProcessResult(true, req.Engine, req.InputPath, outputFile, 0.10, 0, "ok"));
 
         var command = new ProcessImageWithEngineCommand(
-            CreateFormFile("test.png", [1, 2, 3, 4]),
+            "test.png",
+            "image/png",
+            CreateInputStream([1, 2, 3, 4]),
+            4,
             "realesrgan",
             "{\"tile\":128}",
             "0HNNDMHRGPA3F:00000001\\bad?*");
@@ -89,7 +108,7 @@ public class ProcessImageWithEngineUseCaseTests
         var result = await useCase.ExecuteAsync(command, CancellationToken.None);
 
         Assert.True(result.Success);
-        Assert.Equal(StatusCodes.Status200OK, result.StatusCode);
+        Assert.Equal(200, result.StatusCode);
         Assert.NotNull(capturedRequest);
 
         var requestDirectory = Directory.GetParent(Directory.GetParent(capturedRequest!.InputPath)!.FullName)!.Name;
@@ -98,15 +117,20 @@ public class ProcessImageWithEngineUseCaseTests
         Assert.DoesNotContain('/', requestDirectory);
         Assert.DoesNotContain('?', requestDirectory);
         Assert.DoesNotContain('*', requestDirectory);
+
+        if (result.OutputPath is not null)
+        {
+            File.Delete(result.OutputPath);
+            var parent = Path.GetDirectoryName(result.OutputPath);
+            if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent))
+            {
+                Directory.Delete(parent, true);
+            }
+        }
     }
 
-    private static IFormFile CreateFormFile(string fileName, byte[] bytes)
+    private static Stream CreateInputStream(byte[] bytes)
     {
-        var stream = new MemoryStream(bytes);
-        return new FormFile(stream, 0, bytes.Length, "file", fileName)
-        {
-            Headers = new HeaderDictionary(),
-            ContentType = "image/png"
-        };
+        return new MemoryStream(bytes);
     }
 }

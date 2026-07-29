@@ -5,7 +5,7 @@ public sealed record ProcessImageWithEngineResult(
     int StatusCode,
     string CorrelationId,
     string Message,
+    string? OutputPath,
     string? OutputFileName,
-    string? ContentType,
-    byte[]? FileBytes
+    string? ContentType
 );

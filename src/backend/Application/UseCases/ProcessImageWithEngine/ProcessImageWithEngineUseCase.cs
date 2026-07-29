@@ -11,6 +11,10 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
         ".jpg", ".jpeg", ".png", ".webp", ".bmp"
     };
 
+    private const int StatusBadRequest = 400;
+    private const int StatusOk = 200;
+    private const int StatusUnprocessableEntity = 422;
+    private const int StatusInternalServerError = 500;
     private const long MaxFileSizeBytes = 20 * 1024 * 1024;
 
     private readonly IEngineGateway _engineGateway;
@@ -30,8 +34,7 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
             return validation;
         }
 
-        var inputFile = command.File!;
-        var extension = Path.GetExtension(inputFile.FileName);
+        var extension = Path.GetExtension(command.OriginalFileName);
         var safeCorrelationId = BuildSafeCorrelationId(command.CorrelationId);
         var requestDirectory = $"{safeCorrelationId}-{Guid.NewGuid():N}";
         var tempRoot = Path.Combine(Path.GetTempPath(), "murilo-ai", requestDirectory);
@@ -46,7 +49,12 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
         {
             await using (var stream = File.Create(inputPath))
             {
-                await inputFile.CopyToAsync(stream, cancellationToken);
+                if (command.FileStream.CanSeek)
+                {
+                    command.FileStream.Seek(0, SeekOrigin.Begin);
+                }
+
+                await command.FileStream.CopyToAsync(stream, cancellationToken);
             }
 
             var stopwatch = Stopwatch.StartNew();
@@ -66,39 +74,48 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
             {
                 return new ProcessImageWithEngineResult(
                     Success: false,
-                    StatusCode: StatusCodes.Status422UnprocessableEntity,
+                    StatusCode: StatusUnprocessableEntity,
                     CorrelationId: command.CorrelationId,
                     Message: string.IsNullOrWhiteSpace(engineResult.Message) ? "Engine processing failed." : engineResult.Message,
+                    OutputPath: null,
                     OutputFileName: null,
-                    ContentType: null,
-                    FileBytes: null);
+                    ContentType: null);
             }
 
             if (string.IsNullOrWhiteSpace(engineResult.OutputPath) || !File.Exists(engineResult.OutputPath))
             {
                 return new ProcessImageWithEngineResult(
                     Success: false,
-                    StatusCode: StatusCodes.Status500InternalServerError,
+                    StatusCode: StatusInternalServerError,
                     CorrelationId: command.CorrelationId,
                     Message: "Engine did not produce an output file.",
+                    OutputPath: null,
                     OutputFileName: null,
-                    ContentType: null,
-                    FileBytes: null);
+                    ContentType: null);
             }
 
-            var outputBytes = await File.ReadAllBytesAsync(engineResult.OutputPath, cancellationToken);
             var outputExtension = Path.GetExtension(engineResult.OutputPath);
+            if (string.IsNullOrWhiteSpace(outputExtension))
+            {
+                outputExtension = extension;
+            }
+
+            var responseOutput = CopyToResponseOutput(
+                engineResult.OutputPath,
+                command.OriginalFileName,
+                outputExtension,
+                safeCorrelationId);
+
             var contentType = ResolveContentType(outputExtension);
-            var outputName = $"{Path.GetFileNameWithoutExtension(inputFile.FileName)}-processed{outputExtension}";
 
             return new ProcessImageWithEngineResult(
                 Success: true,
-                StatusCode: StatusCodes.Status200OK,
+                StatusCode: StatusOk,
                 CorrelationId: command.CorrelationId,
                 Message: "Image processed successfully.",
-                OutputFileName: outputName,
-                ContentType: contentType,
-                FileBytes: outputBytes);
+                OutputPath: responseOutput.OutputPath,
+                OutputFileName: responseOutput.OutputFileName,
+                ContentType: contentType);
         }
         catch (OperationCanceledException)
         {
@@ -118,12 +135,12 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
 
             return new ProcessImageWithEngineResult(
                 Success: false,
-                StatusCode: StatusCodes.Status500InternalServerError,
+                StatusCode: StatusInternalServerError,
                 CorrelationId: command.CorrelationId,
                 Message: "Unexpected error while processing image.",
+                OutputPath: null,
                 OutputFileName: null,
-                ContentType: null,
-                FileBytes: null);
+                ContentType: null);
         }
         finally
         {
@@ -133,17 +150,17 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
 
     private static ProcessImageWithEngineResult? ValidateCommand(ProcessImageWithEngineCommand command)
     {
-        if (command.File is null || command.File.Length <= 0)
+        if (command.FileStream is null || !command.FileStream.CanRead || command.FileSizeBytes <= 0)
         {
             return ValidationFailure(command.CorrelationId, "A non-empty image file is required.");
         }
 
-        if (command.File.Length > MaxFileSizeBytes)
+        if (command.FileSizeBytes > MaxFileSizeBytes)
         {
             return ValidationFailure(command.CorrelationId, $"File exceeds the maximum size of {MaxFileSizeBytes / (1024 * 1024)} MB.");
         }
 
-        var extension = Path.GetExtension(command.File.FileName);
+        var extension = Path.GetExtension(command.OriginalFileName);
         if (string.IsNullOrWhiteSpace(extension) || !AllowedExtensions.Contains(extension))
         {
             return ValidationFailure(command.CorrelationId, "Unsupported file extension.");
@@ -177,12 +194,12 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
     {
         return new ProcessImageWithEngineResult(
             Success: false,
-            StatusCode: StatusCodes.Status400BadRequest,
+            StatusCode: StatusBadRequest,
             CorrelationId: correlationId,
             Message: message,
+            OutputPath: null,
             OutputFileName: null,
-            ContentType: null,
-            FileBytes: null);
+            ContentType: null);
     }
 
     private static string ResolveContentType(string extension)
@@ -233,5 +250,21 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
         }
 
         return sanitized;
+    }
+
+    private static (string OutputPath, string OutputFileName) CopyToResponseOutput(
+        string sourceOutputPath,
+        string originalFileName,
+        string outputExtension,
+        string safeCorrelationId)
+    {
+        var responseRoot = Path.Combine(Path.GetTempPath(), "murilo-ai-response", $"{safeCorrelationId}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(responseRoot);
+
+        var outputFileName = $"{Path.GetFileNameWithoutExtension(originalFileName)}-processed{outputExtension}";
+        var responseOutputPath = Path.Combine(responseRoot, outputFileName);
+        File.Copy(sourceOutputPath, responseOutputPath, overwrite: true);
+
+        return (responseOutputPath, outputFileName);
     }
 }

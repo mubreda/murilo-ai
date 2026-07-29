@@ -48,7 +48,7 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
     }
 
     [Fact]
-    public async Task Process_ReturnsProblemDetails_WhenFileExtensionIsInvalid()
+    public async Task Process_ReturnsProblemDetails_WhenOptionsJsonIsInvalid()
     {
         using var factory = _factory.WithWebHostBuilder(builder =>
         {
@@ -61,19 +61,20 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         using var client = factory.CreateClient();
         using var content = new MultipartFormDataContent();
 
-        var fileBytes = new byte[] { 1, 2, 3 };
+        var fileBytes = new byte[] { 137, 80, 78, 71 };
         var fileContent = new ByteArrayContent(fileBytes);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
 
-        content.Add(fileContent, "file", "invalid.txt");
+        content.Add(fileContent, "file", "valid.png");
         content.Add(new StringContent("realesrgan"), "engine");
+        content.Add(new StringContent("not-json"), "options");
 
         using var response = await client.PostAsync("/api/image/process", content);
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         Assert.Contains("correlationId", body, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Unsupported file extension", body, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Options must be valid JSON", body, StringComparison.OrdinalIgnoreCase);
     }
 
     private sealed class FakeEngineGateway : IEngineGateway
