@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
@@ -86,6 +87,83 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         Assert.Contains("Options must be valid JSON", body, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task CreateJob_ReturnsAccepted_WithJobIdAndQueuedStatus()
+    {
+        using var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddScoped<IEngineGateway, FakeEngineGateway>();
+            });
+        });
+
+        using var client = factory.CreateClient();
+        using var content = new MultipartFormDataContent();
+
+        var fileBytes = new byte[] { 137, 80, 78, 71 };
+        var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+
+        content.Add(fileContent, "file", "job.png");
+        content.Add(new StringContent("realesrgan"), "engine");
+        content.Add(new StringContent("{\"tile\":128}"), "options");
+
+        using var response = await client.PostAsync("/api/image/jobs", content);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        using var json = JsonDocument.Parse(body);
+        Assert.True(json.RootElement.TryGetProperty("jobId", out var jobIdElement));
+        Assert.False(string.IsNullOrWhiteSpace(jobIdElement.GetString()));
+        Assert.True(json.RootElement.TryGetProperty("status", out var statusElement));
+        Assert.Equal("Queued", statusElement.GetString());
+    }
+
+    [Fact]
+    public async Task JobLifecycle_ReturnsCompletedAndResult_WhenProcessingFinishes()
+    {
+        using var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddScoped<IEngineGateway, FakeEngineGateway>();
+            });
+        });
+
+        using var client = factory.CreateClient();
+        using var content = new MultipartFormDataContent();
+
+        var fileBytes = new byte[] { 137, 80, 78, 71 };
+        var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+
+        content.Add(fileContent, "file", "lifecycle.png");
+        content.Add(new StringContent("realesrgan"), "engine");
+        content.Add(new StringContent("{\"tile\":128}"), "options");
+
+        using var createResponse = await client.PostAsync("/api/image/jobs", content);
+        var createBody = await createResponse.Content.ReadAsStringAsync();
+        using var createJson = JsonDocument.Parse(createBody);
+        var jobId = createJson.RootElement.GetProperty("jobId").GetString();
+
+        Assert.NotNull(jobId);
+
+        using var statusResponse = await WaitForStatusAsync(client, jobId!, "Completed", TimeSpan.FromSeconds(10));
+        var statusBody = await statusResponse.Content.ReadAsStringAsync();
+        using var statusJson = JsonDocument.Parse(statusBody);
+
+        Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+        Assert.Equal("Completed", statusJson.RootElement.GetProperty("status").GetString());
+        Assert.True(statusJson.RootElement.GetProperty("progress").GetInt32() >= 100);
+
+        using var resultResponse = await client.GetAsync($"/api/image/jobs/{jobId}/result");
+        var resultBytes = await resultResponse.Content.ReadAsByteArrayAsync();
+
+        Assert.Equal(HttpStatusCode.OK, resultResponse.StatusCode);
+        Assert.NotEmpty(resultBytes);
+    }
+
     private sealed class FakeEngineGateway : IEngineGateway
     {
         private static readonly object Sync = new();
@@ -135,5 +213,28 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         }
 
         return !File.Exists(path);
+    }
+
+    private static async Task<HttpResponseMessage> WaitForStatusAsync(HttpClient client, string jobId, string expectedStatus, TimeSpan timeout)
+    {
+        var endAt = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow <= endAt)
+        {
+            var response = await client.GetAsync($"/api/image/jobs/{jobId}");
+            var body = await response.Content.ReadAsStringAsync();
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                using var json = JsonDocument.Parse(body);
+                if (json.RootElement.TryGetProperty("status", out var statusElement) &&
+                    string.Equals(statusElement.GetString(), expectedStatus, StringComparison.OrdinalIgnoreCase))
+                {
+                    return response;
+                }
+            }
+
+            await Task.Delay(100);
+        }
+
+        return await client.GetAsync($"/api/image/jobs/{jobId}");
     }
 }

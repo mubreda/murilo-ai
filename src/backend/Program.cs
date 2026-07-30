@@ -1,6 +1,8 @@
+using MuriloAI.Backend.Application.Jobs;
 using MuriloAI.Backend.Application.UseCases.ProcessImageWithEngine;
 using MuriloAI.Backend.Domain.Contracts;
 using MuriloAI.Backend.Infrastructure.Engines;
+using MuriloAI.Backend.Infrastructure.Jobs;
 using MuriloAI.Backend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -18,8 +20,11 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddSingleton<PythonEngineRunner>();
+builder.Services.AddSingleton<IImageProcessingJobStore, InMemoryImageProcessingJobStore>();
+builder.Services.AddSingleton<IImageProcessingJobQueue, ChannelImageProcessingJobQueue>();
 builder.Services.AddScoped<IEngineGateway, PythonEngineGateway>();
 builder.Services.AddScoped<IProcessImageWithEngineUseCase, ProcessImageWithEngineUseCase>();
+builder.Services.AddHostedService<ImageProcessingBackgroundService>();
 
 var app = builder.Build();
 

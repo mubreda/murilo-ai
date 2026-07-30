@@ -7,5 +7,6 @@ public sealed record ProcessImageWithEngineCommand(
     long FileSizeBytes,
     string? Engine,
     string? OptionsJson,
-    string CorrelationId
+    string CorrelationId,
+    bool PreserveOutput = false
 );

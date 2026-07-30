@@ -144,7 +144,10 @@ public sealed class ProcessImageWithEngineUseCase : IProcessImageWithEngineUseCa
         }
         finally
         {
-            TryDeleteDirectory(tempRoot);
+            if (!command.PreserveOutput)
+            {
+                TryDeleteDirectory(tempRoot);
+            }
         }
     }
 
