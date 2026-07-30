@@ -43,6 +43,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
 
     private async Task ProcessJobAsync(ImageProcessingJob job, CancellationToken cancellationToken)
     {
+        if (await IsCanceledAsync(job.Id, cancellationToken))
+        {
+            _logger.LogInformation("Cancel applied before processing started. JobId={JobId}", job.Id);
+            return;
+        }
+
         job.Status = ImageProcessingJobStatus.Processing;
         job.StartedAt = DateTimeOffset.UtcNow;
         job.Progress = 10;
@@ -59,6 +65,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             try
             {
                 _logger.LogInformation("Starting image job attempt. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}, TimeoutSeconds={TimeoutSeconds}", job.Id, job.CorrelationId, attempt, maxAttempts, attemptTimeoutSeconds);
+
+                if (await IsCanceledAsync(job.Id, linkedCancellation.Token))
+                {
+                    await MarkCanceledAsync(job, cancellationToken, "Cancellation requested before processing attempt.");
+                    return;
+                }
 
                 using var scope = _serviceProvider.CreateScope();
                 var useCase = scope.ServiceProvider.GetRequiredService<IProcessImageWithEngineUseCase>();
@@ -83,6 +95,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
                         job.CorrelationId ?? Guid.NewGuid().ToString("N"),
                         PreserveOutput: true),
                     linkedCancellation.Token);
+
+                if (await IsCanceledAsync(job.Id, linkedCancellation.Token))
+                {
+                    await MarkCanceledAsync(job, cancellationToken, "Cancellation requested after engine processing.");
+                    return;
+                }
 
                 job.Progress = 80;
                 await _store.UpdateAsync(job, cancellationToken);
@@ -114,6 +132,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             }
             catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
             {
+                if (await IsCanceledAsync(job.Id, cancellationToken))
+                {
+                    await MarkCanceledAsync(job, cancellationToken, "Cancellation requested during processing attempt.");
+                    return;
+                }
+
                 if (attempt < maxAttempts)
                 {
                     _logger.LogWarning(ex, "Image job attempt timed out. Retrying. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
@@ -132,6 +156,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             }
             catch (IOException ex)
             {
+                if (await IsCanceledAsync(job.Id, cancellationToken))
+                {
+                    await MarkCanceledAsync(job, cancellationToken, "Cancellation requested during I/O handling.");
+                    return;
+                }
+
                 if (attempt < maxAttempts)
                 {
                     _logger.LogWarning(ex, "Image job attempt failed due to I/O. Retrying. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
@@ -150,6 +180,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             }
             catch (Exception ex)
             {
+                if (await IsCanceledAsync(job.Id, cancellationToken))
+                {
+                    await MarkCanceledAsync(job, cancellationToken, "Cancellation requested during exception handling.");
+                    return;
+                }
+
                 job.Status = ImageProcessingJobStatus.Failed;
                 job.ErrorMessage = ex.Message;
                 job.CompletedAt = DateTimeOffset.UtcNow;
@@ -160,6 +196,27 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
                 return;
             }
         }
+    }
+
+    private async Task<bool> IsCanceledAsync(string jobId, CancellationToken cancellationToken)
+    {
+        var current = await _store.GetByIdAsync(jobId, cancellationToken);
+        return current?.Status == ImageProcessingJobStatus.Canceled;
+    }
+
+    private async Task MarkCanceledAsync(ImageProcessingJob job, CancellationToken cancellationToken, string reason)
+    {
+        if (job.Status == ImageProcessingJobStatus.Canceled)
+        {
+            return;
+        }
+
+        job.Status = ImageProcessingJobStatus.Canceled;
+        job.CompletedAt = DateTimeOffset.UtcNow;
+        job.Progress = 100;
+        job.ErrorMessage = reason;
+        await _store.UpdateAsync(job, cancellationToken);
+        _logger.LogInformation("Cancel applied. JobId={JobId}, Reason={Reason}", job.Id, reason);
     }
 
     private static async Task ApplyBackoffAsync(int attempt, CancellationToken cancellationToken)

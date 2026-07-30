@@ -38,5 +38,6 @@ public enum ImageProcessingJobStatus
     Queued,
     Processing,
     Completed,
-    Failed
+    Failed,
+    Canceled
 }

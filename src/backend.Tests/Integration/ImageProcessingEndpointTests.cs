@@ -624,6 +624,206 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         }
     }
 
+    [Fact]
+    public async Task CancelQueuedJob_ReturnsOkAndMarksJobCanceled()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"cancel-queued-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Queued,
+            Engine = "realesrgan",
+            OriginalFileName = "cancel.png",
+            ContentType = "image/png",
+            CorrelationId = "cancel-queued",
+            Progress = 0
+        };
+
+        await store.CreateAsync(job);
+
+        using var cancelResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/cancel", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
+
+        var reloaded = await store.GetByIdAsync(job.Id);
+        Assert.NotNull(reloaded);
+        Assert.Equal(ImageProcessingJobStatus.Canceled, reloaded!.Status);
+    }
+
+    [Fact]
+    public async Task CancelProcessingJob_ReturnsOkAndMarksJobCanceled()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"cancel-processing-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Processing,
+            Engine = "realesrgan",
+            OriginalFileName = "cancel-processing.png",
+            ContentType = "image/png",
+            CorrelationId = "cancel-processing",
+            Progress = 10
+        };
+
+        await store.CreateAsync(job);
+
+        using var cancelResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/cancel", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
+
+        var reloaded = await store.GetByIdAsync(job.Id);
+        Assert.NotNull(reloaded);
+        Assert.Equal(ImageProcessingJobStatus.Canceled, reloaded!.Status);
+    }
+
+    [Fact]
+    public async Task CancelCompletedOrFailedJob_ReturnsConflict()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"cancel-conflict-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Failed,
+            Engine = "realesrgan",
+            OriginalFileName = "cancel-conflict.png",
+            ContentType = "image/png",
+            CorrelationId = "cancel-conflict",
+            Progress = 100,
+            ErrorMessage = "previous failure"
+        };
+
+        await store.CreateAsync(job);
+
+        using var cancelResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/cancel", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.Conflict, cancelResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task RetryFailedJob_ReEnqueuesAndProcessesAgain()
+    {
+        FakeEngineGateway.Reset();
+
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var inputPath = await CreateInputFileAsync("retry-failed.png");
+        var workingDirectory = Path.Combine(Path.GetTempPath(), "murilo-ai-jobs", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workingDirectory);
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"retry-failed-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Failed,
+            Engine = "realesrgan",
+            OriginalFileName = "retry-failed.png",
+            ContentType = "image/png",
+            CorrelationId = "retry-failed",
+            InputPath = inputPath,
+            WorkingDirectory = workingDirectory,
+            Progress = 100,
+            ErrorMessage = "previous failure"
+        };
+
+        await store.CreateAsync(job);
+
+        using var retryResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/retry", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+
+        using var statusResponse = await WaitForStatusAsync(client, job.Id, "Completed", TimeSpan.FromSeconds(10));
+        Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+        Assert.True(FakeEngineGateway.ProcessCallCount > 0);
+    }
+
+    [Fact]
+    public async Task RetryNonEligibleJob_ReturnsConflict()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"retry-conflict-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Queued,
+            Engine = "realesrgan",
+            OriginalFileName = "retry-conflict.png",
+            ContentType = "image/png",
+            CorrelationId = "retry-conflict",
+            Progress = 0
+        };
+
+        await store.CreateAsync(job);
+
+        using var retryResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/retry", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.Conflict, retryResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task StartupBootstrap_IgnoresCanceledJob()
+    {
+        var tempDbPath = Path.Combine(Path.GetTempPath(), $"murilo-ai-tests-{Guid.NewGuid():N}.db");
+        File.Delete(tempDbPath);
+
+        WebApplicationFactory<Program>? initialFactory = null;
+        WebApplicationFactory<Program>? restartedFactory = null;
+
+        try
+        {
+            FakeEngineGateway.Reset();
+            initialFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var initialScope = initialFactory.Services.CreateScope();
+            var initialStore = initialScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+            var job = new ImageProcessingJob
+            {
+                Id = $"canceled-bootstrap-{Guid.NewGuid():N}",
+                Status = ImageProcessingJobStatus.Canceled,
+                Engine = "realesrgan",
+                OriginalFileName = "canceled-bootstrap.png",
+                ContentType = "image/png",
+                CorrelationId = "canceled-bootstrap",
+                Progress = 0
+            };
+
+            await initialStore.CreateAsync(job);
+
+            restartedFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            await Task.Delay(1000);
+
+            using var restartedScope = restartedFactory.Services.CreateScope();
+            var restartedStore = restartedScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+            var reloaded = await restartedStore.GetByIdAsync(job.Id);
+
+            Assert.NotNull(reloaded);
+            Assert.Equal(ImageProcessingJobStatus.Canceled, reloaded!.Status);
+            Assert.Equal(0, FakeEngineGateway.ProcessCallCount);
+        }
+        finally
+        {
+            initialFactory?.Dispose();
+            restartedFactory?.Dispose();
+            await DeleteFileIfExistsAsync(tempDbPath);
+        }
+    }
+
     private sealed class FakeEngineGateway : IEngineGateway
     {
         private static readonly object Sync = new();

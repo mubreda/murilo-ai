@@ -14,11 +14,13 @@ public sealed class ImageJobsController : ControllerBase
 {
     private readonly IImageProcessingJobStore _jobStore;
     private readonly IImageProcessingJobQueue _jobQueue;
+    private readonly ILogger<ImageJobsController> _logger;
 
-    public ImageJobsController(IImageProcessingJobStore jobStore, IImageProcessingJobQueue jobQueue)
+    public ImageJobsController(IImageProcessingJobStore jobStore, IImageProcessingJobQueue jobQueue, ILogger<ImageJobsController> logger)
     {
         _jobStore = jobStore;
         _jobQueue = jobQueue;
+        _logger = logger;
     }
 
     [HttpPost("jobs")]
@@ -116,6 +118,64 @@ public sealed class ImageJobsController : ControllerBase
             job.CorrelationId);
 
         return Ok(response);
+    }
+
+    [HttpPost("jobs/{jobId}/cancel")]
+    public async Task<IActionResult> CancelJob(string jobId, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Cancel requested. JobId={JobId}", jobId);
+
+        var job = await _jobStore.GetByIdAsync(jobId, cancellationToken);
+        if (job is null)
+        {
+            return CreateProblemDetails(StatusCodes.Status404NotFound, "Job not found.", HttpContext.TraceIdentifier);
+        }
+
+        if (job.Status is ImageProcessingJobStatus.Completed or ImageProcessingJobStatus.Failed or ImageProcessingJobStatus.Canceled)
+        {
+            _logger.LogInformation("Cancel ignored/rejected. JobId={JobId}, Status={Status}", job.Id, job.Status);
+            return CreateProblemDetails(StatusCodes.Status409Conflict, "Job cannot be canceled in its current state.", job.CorrelationId);
+        }
+
+        var previousStatus = job.Status;
+        job.Status = ImageProcessingJobStatus.Canceled;
+        job.CompletedAt = DateTimeOffset.UtcNow;
+        job.Progress = 100;
+        job.ErrorMessage = "Job canceled by operator.";
+        await _jobStore.UpdateAsync(job, cancellationToken);
+
+        _logger.LogInformation("Cancel applied. JobId={JobId}, PreviousStatus={PreviousStatus}", job.Id, previousStatus);
+        return Ok(new { jobId = job.Id, status = job.Status.ToString() });
+    }
+
+    [HttpPost("jobs/{jobId}/retry")]
+    public async Task<IActionResult> RetryJob(string jobId, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Retry requested. JobId={JobId}", jobId);
+
+        var job = await _jobStore.GetByIdAsync(jobId, cancellationToken);
+        if (job is null)
+        {
+            return CreateProblemDetails(StatusCodes.Status404NotFound, "Job not found.", HttpContext.TraceIdentifier);
+        }
+
+        if (job.Status != ImageProcessingJobStatus.Failed)
+        {
+            _logger.LogInformation("Retry rejected. JobId={JobId}, Status={Status}", job.Id, job.Status);
+            return CreateProblemDetails(StatusCodes.Status409Conflict, "Only failed jobs can be retried.", job.CorrelationId);
+        }
+
+        job.Status = ImageProcessingJobStatus.Queued;
+        job.StartedAt = null;
+        job.CompletedAt = null;
+        job.Progress = 0;
+        job.ErrorMessage = null;
+        job.OutputPath = null;
+        await _jobStore.UpdateAsync(job, cancellationToken);
+        await _jobQueue.QueueAsync(job, cancellationToken);
+
+        _logger.LogInformation("Retry accepted and enqueued. JobId={JobId}", job.Id);
+        return Ok(new { jobId = job.Id, status = job.Status.ToString() });
     }
 
     [HttpGet("jobs/{jobId}/result")]
