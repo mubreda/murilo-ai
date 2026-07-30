@@ -25,4 +25,14 @@ public sealed class InMemoryImageProcessingJobStore : IImageProcessingJobStore
         _jobs[job.Id] = job;
         return Task.CompletedTask;
     }
+
+    public Task<IReadOnlyCollection<ImageProcessingJob>> ListNonFinalAsync(CancellationToken cancellationToken = default)
+    {
+        var jobs = _jobs.Values
+            .Where(job => job.Status is ImageProcessingJobStatus.Queued or ImageProcessingJobStatus.Processing)
+            .OrderBy(job => job.CreatedAt)
+            .ToList();
+
+        return Task.FromResult<IReadOnlyCollection<ImageProcessingJob>>(jobs);
+    }
 }

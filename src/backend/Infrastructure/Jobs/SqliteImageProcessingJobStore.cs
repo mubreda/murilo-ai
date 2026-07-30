@@ -9,19 +9,18 @@ namespace MuriloAI.Backend.Infrastructure.Jobs;
 public sealed class SqliteImageProcessingJobStore : IImageProcessingJobStore, IDisposable
 {
     private readonly string _connectionString;
-    private readonly DbConnection _connection;
 
     public SqliteImageProcessingJobStore(IConfiguration configuration)
     {
         _connectionString = configuration.GetValue<string>("ImageJobs:SqliteConnectionString") ?? "Data Source=jobs.db";
-        _connection = new SqliteConnection(_connectionString);
-        _connection.Open();
-        EnsureSchema();
     }
 
     public async Task<ImageProcessingJob> CreateAsync(ImageProcessingJob job, CancellationToken cancellationToken = default)
     {
-        await using var command = _connection.CreateCommand();
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await EnsureSchemaAsync(connection, cancellationToken);
+
+        await using var command = connection.CreateCommand();
         command.CommandText = @"
             INSERT INTO ImageProcessingJobs (
                 Id, Status, CreatedAt, StartedAt, CompletedAt,
@@ -55,7 +54,10 @@ public sealed class SqliteImageProcessingJobStore : IImageProcessingJobStore, ID
 
     public async Task<ImageProcessingJob?> GetByIdAsync(string jobId, CancellationToken cancellationToken = default)
     {
-        await using var command = _connection.CreateCommand();
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await EnsureSchemaAsync(connection, cancellationToken);
+
+        await using var command = connection.CreateCommand();
         command.CommandText = @"
             SELECT Id, Status, CreatedAt, StartedAt, CompletedAt,
                    Engine, OriginalFileName, ContentType, OptionsJson, CorrelationId,
@@ -75,7 +77,10 @@ public sealed class SqliteImageProcessingJobStore : IImageProcessingJobStore, ID
 
     public async Task UpdateAsync(ImageProcessingJob job, CancellationToken cancellationToken = default)
     {
-        await using var command = _connection.CreateCommand();
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await EnsureSchemaAsync(connection, cancellationToken);
+
+        await using var command = connection.CreateCommand();
         command.CommandText = @"
             UPDATE ImageProcessingJobs
             SET Status = $status,
@@ -111,14 +116,50 @@ public sealed class SqliteImageProcessingJobStore : IImageProcessingJobStore, ID
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public void Dispose()
+    public async Task<IReadOnlyCollection<ImageProcessingJob>> ListNonFinalAsync(CancellationToken cancellationToken = default)
     {
-        _connection.Dispose();
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await EnsureSchemaAsync(connection, cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = @"
+            SELECT Id, Status, CreatedAt, StartedAt, CompletedAt,
+                   Engine, OriginalFileName, ContentType, OptionsJson, CorrelationId,
+                   InputPath, WorkingDirectory, OutputPath, ErrorMessage, Progress
+            FROM ImageProcessingJobs
+            WHERE Status IN ('Queued', 'Processing')
+            ORDER BY CreatedAt ASC;";
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var jobs = new List<ImageProcessingJob>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            jobs.Add(Map(reader));
+        }
+
+        return jobs;
     }
 
-    private void EnsureSchema()
+    public void Dispose()
     {
-        using var command = _connection.CreateCommand();
+    }
+
+    private async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var builder = new SqliteConnectionStringBuilder(_connectionString)
+        {
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false
+        };
+
+        var connection = new SqliteConnection(builder.ConnectionString);
+        await connection.OpenAsync(cancellationToken);
+        return connection;
+    }
+
+    private static async Task EnsureSchemaAsync(DbConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
         command.CommandText = @"
             CREATE TABLE IF NOT EXISTS ImageProcessingJobs (
                 Id TEXT PRIMARY KEY,
@@ -137,7 +178,7 @@ public sealed class SqliteImageProcessingJobStore : IImageProcessingJobStore, ID
                 ErrorMessage TEXT NULL,
                 Progress INTEGER NOT NULL
             );";
-        command.ExecuteNonQuery();
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static void AddParameter(DbCommand command, string name, object? value)
