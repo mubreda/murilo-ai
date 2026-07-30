@@ -679,9 +679,48 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         using var cancelResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/cancel", new StringContent(string.Empty));
         Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
 
+        var body = await cancelResponse.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("cancel", json.RootElement.GetProperty("action").GetString());
+        Assert.True(json.RootElement.GetProperty("accepted").GetBoolean());
+
         var reloaded = await store.GetByIdAsync(job.Id);
         Assert.NotNull(reloaded);
         Assert.Equal(ImageProcessingJobStatus.Canceled, reloaded!.Status);
+        Assert.NotEqual(100, reloaded.Progress);
+    }
+
+    [Fact]
+    public async Task CancelCanceledJob_ReturnsOkAndIsIdempotent()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"cancel-idempotent-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Canceled,
+            Engine = "realesrgan",
+            OriginalFileName = "cancel-idempotent.png",
+            ContentType = "image/png",
+            CorrelationId = "cancel-idempotent",
+            Progress = 15,
+            ErrorMessage = "Job canceled by operator."
+        };
+
+        await store.CreateAsync(job);
+
+        using var cancelResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/cancel", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, cancelResponse.StatusCode);
+
+        var body = await cancelResponse.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("cancel", json.RootElement.GetProperty("action").GetString());
+        Assert.True(json.RootElement.GetProperty("alreadyInDesiredState").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("accepted").GetBoolean());
     }
 
     [Fact]
@@ -751,7 +790,7 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
     }
 
     [Fact]
-    public async Task RetryNonEligibleJob_ReturnsConflict()
+    public async Task RetryNonEligibleJob_ReturnsOkAsIdempotent_WhenAlreadyQueued()
     {
         using var factory = CreateFactory();
         using var client = factory.CreateClient();
@@ -773,7 +812,54 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         await store.CreateAsync(job);
 
         using var retryResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/retry", new StringContent(string.Empty));
-        Assert.Equal(HttpStatusCode.Conflict, retryResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+
+        var body = await retryResponse.Content.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal("retry", json.RootElement.GetProperty("action").GetString());
+        Assert.True(json.RootElement.GetProperty("alreadyInDesiredState").GetBoolean());
+    }
+
+    [Fact]
+    public async Task RetryQueuedJob_ReturnsIdempotentPayloadWithoutDoubleEnqueue()
+    {
+        using var factory = CreateFactory();
+        using var client = factory.CreateClient();
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = $"retry-queued-{Guid.NewGuid():N}",
+            Status = ImageProcessingJobStatus.Queued,
+            Engine = "realesrgan",
+            OriginalFileName = "retry-queued.png",
+            ContentType = "image/png",
+            CorrelationId = "retry-queued",
+            Progress = 0
+        };
+
+        await store.CreateAsync(job);
+
+        using var firstRetryResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/retry", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, firstRetryResponse.StatusCode);
+
+        var firstBody = await firstRetryResponse.Content.ReadAsStringAsync();
+        using var firstJson = JsonDocument.Parse(firstBody);
+        Assert.True(firstJson.RootElement.GetProperty("alreadyInDesiredState").GetBoolean());
+        Assert.Equal("retry", firstJson.RootElement.GetProperty("action").GetString());
+
+        using var secondRetryResponse = await client.PostAsync($"/api/image/jobs/{job.Id}/retry", new StringContent(string.Empty));
+        Assert.Equal(HttpStatusCode.OK, secondRetryResponse.StatusCode);
+
+        var secondBody = await secondRetryResponse.Content.ReadAsStringAsync();
+        using var secondJson = JsonDocument.Parse(secondBody);
+        Assert.True(secondJson.RootElement.GetProperty("alreadyInDesiredState").GetBoolean());
+
+        var reloaded = await store.GetByIdAsync(job.Id);
+        Assert.NotNull(reloaded);
+        Assert.Equal(ImageProcessingJobStatus.Queued, reloaded!.Status);
     }
 
     [Fact]

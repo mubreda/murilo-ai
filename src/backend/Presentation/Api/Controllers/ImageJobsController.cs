@@ -131,7 +131,13 @@ public sealed class ImageJobsController : ControllerBase
             return CreateProblemDetails(StatusCodes.Status404NotFound, "Job not found.", HttpContext.TraceIdentifier);
         }
 
-        if (job.Status is ImageProcessingJobStatus.Completed or ImageProcessingJobStatus.Failed or ImageProcessingJobStatus.Canceled)
+        if (job.Status == ImageProcessingJobStatus.Canceled)
+        {
+            _logger.LogInformation("Cancel ignored/rejected. JobId={JobId}, Status={Status}", job.Id, job.Status);
+            return Ok(new ImageJobActionResponse(job.Id, job.Status.ToString(), "cancel", Accepted: true, "Job is already canceled.", AlreadyInDesiredState: true));
+        }
+
+        if (job.Status is ImageProcessingJobStatus.Completed or ImageProcessingJobStatus.Failed)
         {
             _logger.LogInformation("Cancel ignored/rejected. JobId={JobId}, Status={Status}", job.Id, job.Status);
             return CreateProblemDetails(StatusCodes.Status409Conflict, "Job cannot be canceled in its current state.", job.CorrelationId);
@@ -140,12 +146,11 @@ public sealed class ImageJobsController : ControllerBase
         var previousStatus = job.Status;
         job.Status = ImageProcessingJobStatus.Canceled;
         job.CompletedAt = DateTimeOffset.UtcNow;
-        job.Progress = 100;
         job.ErrorMessage = "Job canceled by operator.";
         await _jobStore.UpdateAsync(job, cancellationToken);
 
         _logger.LogInformation("Cancel applied. JobId={JobId}, PreviousStatus={PreviousStatus}", job.Id, previousStatus);
-        return Ok(new { jobId = job.Id, status = job.Status.ToString() });
+        return Ok(new ImageJobActionResponse(job.Id, job.Status.ToString(), "cancel", Accepted: true, "Job canceled successfully.", AlreadyInDesiredState: false));
     }
 
     [HttpPost("jobs/{jobId}/retry")]
@@ -157,6 +162,12 @@ public sealed class ImageJobsController : ControllerBase
         if (job is null)
         {
             return CreateProblemDetails(StatusCodes.Status404NotFound, "Job not found.", HttpContext.TraceIdentifier);
+        }
+
+        if (job.Status == ImageProcessingJobStatus.Queued)
+        {
+            _logger.LogInformation("Retry ignored/rejected. JobId={JobId}, Status={Status}", job.Id, job.Status);
+            return Ok(new ImageJobActionResponse(job.Id, job.Status.ToString(), "retry", Accepted: true, "Job is already queued.", AlreadyInDesiredState: true));
         }
 
         if (job.Status != ImageProcessingJobStatus.Failed)
@@ -175,7 +186,7 @@ public sealed class ImageJobsController : ControllerBase
         await _jobQueue.QueueAsync(job, cancellationToken);
 
         _logger.LogInformation("Retry accepted and enqueued. JobId={JobId}", job.Id);
-        return Ok(new { jobId = job.Id, status = job.Status.ToString() });
+        return Ok(new ImageJobActionResponse(job.Id, job.Status.ToString(), "retry", Accepted: true, "Retry accepted and enqueued.", AlreadyInDesiredState: false));
     }
 
     [HttpGet("jobs/{jobId}/result")]
