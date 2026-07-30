@@ -57,11 +57,25 @@ static async Task RecoverPendingJobsAsync(WebApplication app)
     var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
     var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
     var queue = scope.ServiceProvider.GetRequiredService<IImageProcessingJobQueue>();
+    var options = scope.ServiceProvider.GetRequiredService<IOptions<ImageJobsOptions>>().Value;
 
-    logger.LogInformation("Starting image job recovery bootstrap. StoreProvider={StoreProvider}, SqliteConnectionString={SqliteConnectionString}", configuration["ImageJobs:StoreProvider"], configuration["ImageJobs:SqliteConnectionString"]);
+    var storeProvider = configuration["ImageJobs:StoreProvider"] ?? "InMemory";
+    var hasSqliteConnectionString = !string.IsNullOrWhiteSpace(configuration["ImageJobs:SqliteConnectionString"]);
+
+    logger.LogInformation(
+        "Starting image job recovery bootstrap. StoreProvider={StoreProvider}, HasSqliteConnectionString={HasSqliteConnectionString}, RecoveryWindowHours={RecoveryWindowHours}",
+        storeProvider,
+        hasSqliteConnectionString,
+        options.RecoveryWindowHours);
 
     var pendingJobs = (await store.ListNonFinalAsync()).OrderBy(job => job.CreatedAt).ToList();
-    if (pendingJobs.Count == 0)
+    var cutoff = DateTimeOffset.UtcNow.AddHours(-options.RecoveryWindowHours);
+    var eligibleJobs = pendingJobs.Where(job => job.CreatedAt >= cutoff).ToList();
+    var ignoredJobs = pendingJobs.Count - eligibleJobs.Count;
+
+    logger.LogInformation("Found {FoundCount} non-final image job(s) for recovery bootstrap, {EligibleCount} eligible by recovery window, {IgnoredCount} ignored by age.", pendingJobs.Count, eligibleJobs.Count, ignoredJobs);
+
+    if (eligibleJobs.Count == 0)
     {
         logger.LogInformation("No persisted image jobs needed recovery.");
         return;
@@ -70,7 +84,7 @@ static async Task RecoverPendingJobsAsync(WebApplication app)
     var seenJobIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var recoveredJobs = new List<ImageProcessingJob>();
 
-    foreach (var job in pendingJobs)
+    foreach (var job in eligibleJobs)
     {
         if (!seenJobIds.Add(job.Id))
         {

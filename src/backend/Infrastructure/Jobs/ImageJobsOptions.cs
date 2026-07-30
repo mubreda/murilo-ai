@@ -7,4 +7,6 @@ public sealed class ImageJobsOptions
     public int AttemptTimeoutSeconds { get; set; } = 120;
 
     public int MaxAttempts { get; set; } = 3;
+
+    public int RecoveryWindowHours { get; set; } = 24;
 }

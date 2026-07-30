@@ -467,6 +467,163 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         }
     }
 
+    [Fact]
+    public async Task StartupBootstrap_ReEnqueuesQueuedJobWithinRecoveryWindow()
+    {
+        var tempDbPath = Path.Combine(Path.GetTempPath(), $"murilo-ai-tests-{Guid.NewGuid():N}.db");
+        File.Delete(tempDbPath);
+
+        WebApplicationFactory<Program>? initialFactory = null;
+        WebApplicationFactory<Program>? restartedFactory = null;
+
+        try
+        {
+            FakeEngineGateway.Reset();
+            initialFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var initialScope = initialFactory.Services.CreateScope();
+            var initialStore = initialScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+            var inputPath = await CreateInputFileAsync("queued-within-window.png");
+            var workingDirectory = Path.Combine(Path.GetTempPath(), "murilo-ai-jobs", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workingDirectory);
+
+            var job = new ImageProcessingJob
+            {
+                Id = $"queued-within-window-{Guid.NewGuid():N}",
+                Status = ImageProcessingJobStatus.Queued,
+                CreatedAt = DateTimeOffset.UtcNow.AddHours(-2),
+                Engine = "realesrgan",
+                OriginalFileName = "queued-within-window.png",
+                ContentType = "image/png",
+                CorrelationId = "queued-within-window",
+                InputPath = inputPath,
+                WorkingDirectory = workingDirectory,
+                Progress = 0
+            };
+
+            await initialStore.CreateAsync(job);
+
+            restartedFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var client = restartedFactory.CreateClient();
+
+            using var statusResponse = await WaitForStatusAsync(client, job.Id, "Completed", TimeSpan.FromSeconds(10));
+            Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+            Assert.True(FakeEngineGateway.ProcessCallCount > 0);
+        }
+        finally
+        {
+            initialFactory?.Dispose();
+            restartedFactory?.Dispose();
+            await DeleteFileIfExistsAsync(tempDbPath);
+        }
+    }
+
+    [Fact]
+    public async Task StartupBootstrap_ReEnqueuesProcessingJobWithinRecoveryWindow()
+    {
+        var tempDbPath = Path.Combine(Path.GetTempPath(), $"murilo-ai-tests-{Guid.NewGuid():N}.db");
+        File.Delete(tempDbPath);
+
+        WebApplicationFactory<Program>? initialFactory = null;
+        WebApplicationFactory<Program>? restartedFactory = null;
+
+        try
+        {
+            FakeEngineGateway.Reset();
+            initialFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var initialScope = initialFactory.Services.CreateScope();
+            var initialStore = initialScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+            var inputPath = await CreateInputFileAsync("processing-within-window.png");
+            var workingDirectory = Path.Combine(Path.GetTempPath(), "murilo-ai-jobs", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workingDirectory);
+
+            var job = new ImageProcessingJob
+            {
+                Id = $"processing-within-window-{Guid.NewGuid():N}",
+                Status = ImageProcessingJobStatus.Processing,
+                CreatedAt = DateTimeOffset.UtcNow.AddHours(-3),
+                Engine = "realesrgan",
+                OriginalFileName = "processing-within-window.png",
+                ContentType = "image/png",
+                CorrelationId = "processing-within-window",
+                InputPath = inputPath,
+                WorkingDirectory = workingDirectory,
+                Progress = 10
+            };
+
+            await initialStore.CreateAsync(job);
+
+            restartedFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var client = restartedFactory.CreateClient();
+
+            using var statusResponse = await WaitForStatusAsync(client, job.Id, "Completed", TimeSpan.FromSeconds(10));
+            Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+            Assert.True(FakeEngineGateway.ProcessCallCount > 0);
+        }
+        finally
+        {
+            initialFactory?.Dispose();
+            restartedFactory?.Dispose();
+            await DeleteFileIfExistsAsync(tempDbPath);
+        }
+    }
+
+    [Fact]
+    public async Task StartupBootstrap_IgnoresNonFinalJobOutsideRecoveryWindow()
+    {
+        var tempDbPath = Path.Combine(Path.GetTempPath(), $"murilo-ai-tests-{Guid.NewGuid():N}.db");
+        File.Delete(tempDbPath);
+
+        WebApplicationFactory<Program>? initialFactory = null;
+        WebApplicationFactory<Program>? restartedFactory = null;
+
+        try
+        {
+            FakeEngineGateway.Reset();
+            initialFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            using var initialScope = initialFactory.Services.CreateScope();
+            var initialStore = initialScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+            var inputPath = await CreateInputFileAsync("queued-outside-window.png");
+            var workingDirectory = Path.Combine(Path.GetTempPath(), "murilo-ai-jobs", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(workingDirectory);
+
+            var job = new ImageProcessingJob
+            {
+                Id = $"queued-outside-window-{Guid.NewGuid():N}",
+                Status = ImageProcessingJobStatus.Queued,
+                CreatedAt = DateTimeOffset.UtcNow.AddHours(-48),
+                Engine = "realesrgan",
+                OriginalFileName = "queued-outside-window.png",
+                ContentType = "image/png",
+                CorrelationId = "queued-outside-window",
+                InputPath = inputPath,
+                WorkingDirectory = workingDirectory,
+                Progress = 0
+            };
+
+            await initialStore.CreateAsync(job);
+
+            restartedFactory = CreateFactory(tempDbPath, recoveryWindowHours: 24);
+            await Task.Delay(1000);
+
+            using var restartedScope = restartedFactory.Services.CreateScope();
+            var restartedStore = restartedScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+            var reloaded = await restartedStore.GetByIdAsync(job.Id);
+
+            Assert.NotNull(reloaded);
+            Assert.Equal(ImageProcessingJobStatus.Queued, reloaded!.Status);
+            Assert.Equal(0, FakeEngineGateway.ProcessCallCount);
+        }
+        finally
+        {
+            initialFactory?.Dispose();
+            restartedFactory?.Dispose();
+            await DeleteFileIfExistsAsync(tempDbPath);
+        }
+    }
+
     private sealed class FakeEngineGateway : IEngineGateway
     {
         private static readonly object Sync = new();
@@ -511,11 +668,12 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         }
     }
 
-    private WebApplicationFactory<Program> CreateFactory(string? sqliteConnectionString = null)
+    private WebApplicationFactory<Program> CreateFactory(string? sqliteConnectionString = null, int? recoveryWindowHours = null)
     {
         return _factory.WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ImageJobs:StoreProvider", "Sqlite");
+            builder.UseSetting("ImageJobs:RecoveryWindowHours", (recoveryWindowHours ?? 24).ToString());
 
             if (!string.IsNullOrWhiteSpace(sqliteConnectionString))
             {
