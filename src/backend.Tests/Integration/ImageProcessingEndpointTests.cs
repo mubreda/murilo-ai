@@ -3,9 +3,12 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MuriloAI.Backend.Application.Jobs;
 using MuriloAI.Backend.Domain.Contracts;
+using MuriloAI.Backend.Domain.Models;
+using MuriloAI.Backend.Infrastructure.Jobs;
 using Xunit;
 
 namespace MuriloAI.Backend.Tests.Integration;
@@ -255,6 +258,64 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         {
             FakeEngineGateway.OutputExtension = ".png";
         }
+    }
+
+    [Fact]
+    public async Task SqliteStore_PersistsJobAcrossServiceScopes()
+    {
+        var tempDbPath = Path.Combine(Path.GetTempPath(), $"murilo-ai-tests-{Guid.NewGuid():N}.db");
+        File.Delete(tempDbPath);
+
+        using var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, configurationBuilder) =>
+            {
+                configurationBuilder.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["ImageJobs:StoreProvider"] = "Sqlite",
+                    ["ImageJobs:SqliteConnectionString"] = $"Data Source={tempDbPath}"
+                });
+            });
+
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddScoped<IEngineGateway, FakeEngineGateway>();
+            });
+        });
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+
+        var job = new ImageProcessingJob
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Status = ImageProcessingJobStatus.Queued,
+            Engine = "realesrgan",
+            OriginalFileName = "sample.png",
+            ContentType = "image/png",
+            CorrelationId = "test-correlation",
+            Progress = 0
+        };
+
+        await store.CreateAsync(job);
+
+        var loaded = await store.GetByIdAsync(job.Id);
+        Assert.NotNull(loaded);
+        Assert.Equal(ImageProcessingJobStatus.Queued, loaded!.Status);
+
+        loaded.Status = ImageProcessingJobStatus.Processing;
+        loaded.Progress = 55;
+        await store.UpdateAsync(loaded);
+
+        using var secondScope = factory.Services.CreateScope();
+        var storeFromSecondScope = secondScope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+        var reloaded = await storeFromSecondScope.GetByIdAsync(job.Id);
+
+        Assert.NotNull(reloaded);
+        Assert.Equal(ImageProcessingJobStatus.Processing, reloaded!.Status);
+        Assert.Equal(55, reloaded.Progress);
+
+        File.Delete(tempDbPath);
     }
 
     private sealed class FakeEngineGateway : IEngineGateway

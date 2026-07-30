@@ -21,11 +21,22 @@ builder.Services.AddCors(options =>
 });
 
 builder.Services.AddSingleton<PythonEngineRunner>();
-builder.Services.AddSingleton<IImageProcessingJobStore, InMemoryImageProcessingJobStore>();
 builder.Services.AddSingleton<IImageProcessingJobQueue, ChannelImageProcessingJobQueue>();
 builder.Services.AddScoped<IEngineGateway, PythonEngineGateway>();
 builder.Services.AddScoped<IProcessImageWithEngineUseCase, ProcessImageWithEngineUseCase>();
 builder.Services.Configure<ImageJobsOptions>(builder.Configuration.GetSection(ImageJobsOptions.SectionName));
+builder.Services.Configure<ImageJobsStoreOptions>(builder.Configuration.GetSection(ImageJobsStoreOptions.SectionName));
+
+var storeProvider = builder.Configuration.GetValue<string>("ImageJobs:StoreProvider") ?? "InMemory";
+if (string.Equals(storeProvider, "Sqlite", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IImageProcessingJobStore, SqliteImageProcessingJobStore>();
+}
+else
+{
+    builder.Services.AddSingleton<IImageProcessingJobStore, InMemoryImageProcessingJobStore>();
+}
+
 builder.Services.AddHostedService<ImageProcessingBackgroundService>();
 
 var app = builder.Build();
