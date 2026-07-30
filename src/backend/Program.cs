@@ -4,6 +4,7 @@ using MuriloAI.Backend.Domain.Contracts;
 using MuriloAI.Backend.Infrastructure.Engines;
 using MuriloAI.Backend.Infrastructure.Jobs;
 using MuriloAI.Backend.Services;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,6 +25,7 @@ builder.Services.AddSingleton<IImageProcessingJobStore, InMemoryImageProcessingJ
 builder.Services.AddSingleton<IImageProcessingJobQueue, ChannelImageProcessingJobQueue>();
 builder.Services.AddScoped<IEngineGateway, PythonEngineGateway>();
 builder.Services.AddScoped<IProcessImageWithEngineUseCase, ProcessImageWithEngineUseCase>();
+builder.Services.Configure<ImageJobsOptions>(builder.Configuration.GetSection(ImageJobsOptions.SectionName));
 builder.Services.AddHostedService<ImageProcessingBackgroundService>();
 
 var app = builder.Build();
