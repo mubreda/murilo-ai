@@ -53,8 +53,7 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var attemptCancellation = new CancellationTokenSource();
-            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, attemptCancellation.Token);
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             linkedCancellation.CancelAfter(TimeSpan.FromSeconds(attemptTimeoutSeconds));
 
             try
@@ -90,12 +89,6 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
 
                 if (!result.Success || string.IsNullOrWhiteSpace(result.OutputPath) || !File.Exists(result.OutputPath))
                 {
-                    if (attempt < maxAttempts)
-                    {
-                        _logger.LogWarning("Image job attempt failed with processing result error. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}, Message={Message}", job.Id, job.CorrelationId, attempt, maxAttempts, string.IsNullOrWhiteSpace(result.Message) ? "Engine processing failed." : result.Message);
-                        continue;
-                    }
-
                     job.Status = ImageProcessingJobStatus.Failed;
                     job.ErrorMessage = string.IsNullOrWhiteSpace(result.Message) ? "Engine processing failed." : result.Message;
                     job.CompletedAt = DateTimeOffset.UtcNow;
@@ -123,7 +116,8 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             {
                 if (attempt < maxAttempts)
                 {
-                    _logger.LogWarning(ex, "Image job attempt timed out or was canceled. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
+                    _logger.LogWarning(ex, "Image job attempt timed out. Retrying. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
+                    await ApplyBackoffAsync(attempt, cancellationToken);
                     continue;
                 }
 
@@ -136,11 +130,12 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
                 _logger.LogError(ex, "Background image job failed after retries. JobId={JobId}, CorrelationId={CorrelationId}", job.Id, job.CorrelationId);
                 return;
             }
-            catch (Exception ex)
+            catch (IOException ex)
             {
                 if (attempt < maxAttempts)
                 {
-                    _logger.LogWarning(ex, "Image job attempt failed transiently. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
+                    _logger.LogWarning(ex, "Image job attempt failed due to I/O. Retrying. JobId={JobId}, CorrelationId={CorrelationId}, Attempt={Attempt}/{MaxAttempts}", job.Id, job.CorrelationId, attempt, maxAttempts);
+                    await ApplyBackoffAsync(attempt, cancellationToken);
                     continue;
                 }
 
@@ -153,6 +148,32 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
                 _logger.LogError(ex, "Background image job failed after retries. JobId={JobId}, CorrelationId={CorrelationId}", job.Id, job.CorrelationId);
                 return;
             }
+            catch (Exception ex)
+            {
+                job.Status = ImageProcessingJobStatus.Failed;
+                job.ErrorMessage = ex.Message;
+                job.CompletedAt = DateTimeOffset.UtcNow;
+                job.Progress = 100;
+                await _store.UpdateAsync(job, cancellationToken);
+                TryDeleteWorkingDirectory(job.WorkingDirectory);
+                _logger.LogError(ex, "Background image job failed without retry. JobId={JobId}, CorrelationId={CorrelationId}", job.Id, job.CorrelationId);
+                return;
+            }
+        }
+    }
+
+    private static async Task ApplyBackoffAsync(int attempt, CancellationToken cancellationToken)
+    {
+        var delayMs = attempt switch
+        {
+            1 => 500,
+            2 => 1500,
+            _ => 0
+        };
+
+        if (delayMs > 0)
+        {
+            await Task.Delay(delayMs, cancellationToken);
         }
     }
 
