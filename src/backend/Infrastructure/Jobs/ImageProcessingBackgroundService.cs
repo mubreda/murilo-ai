@@ -80,10 +80,16 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
                 job.CompletedAt = DateTimeOffset.UtcNow;
                 job.Progress = 100;
                 await _store.UpdateAsync(job, cancellationToken);
+                TryDeleteWorkingDirectory(job.WorkingDirectory);
                 return;
             }
 
-            job.OutputPath = result.OutputPath;
+            var resultDirectory = Path.Combine(job.WorkingDirectory ?? Path.GetTempPath(), "result");
+            Directory.CreateDirectory(resultDirectory);
+            var targetOutputPath = Path.Combine(resultDirectory, Path.GetFileName(result.OutputPath));
+            File.Copy(result.OutputPath, targetOutputPath, overwrite: true);
+
+            job.OutputPath = targetOutputPath;
             job.Status = ImageProcessingJobStatus.Completed;
             job.CompletedAt = DateTimeOffset.UtcNow;
             job.Progress = 100;
@@ -98,7 +104,25 @@ public sealed class ImageProcessingBackgroundService : BackgroundService
             job.CompletedAt = DateTimeOffset.UtcNow;
             job.Progress = 100;
             await _store.UpdateAsync(job, cancellationToken);
+            TryDeleteWorkingDirectory(job.WorkingDirectory);
             _logger.LogError(ex, "Background image job failed. JobId={JobId}, CorrelationId={CorrelationId}", job.Id, job.CorrelationId);
+        }
+    }
+
+    private static void TryDeleteWorkingDirectory(string? workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(workingDirectory) || !Directory.Exists(workingDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(workingDirectory, recursive: true);
+        }
+        catch
+        {
+            // Best-effort cleanup.
         }
     }
 }

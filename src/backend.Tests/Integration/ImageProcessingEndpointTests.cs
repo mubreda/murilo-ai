@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using MuriloAI.Backend.Application.Jobs;
 using MuriloAI.Backend.Domain.Contracts;
 using Xunit;
 
@@ -164,23 +165,117 @@ public class ImageProcessingEndpointTests : IClassFixture<WebApplicationFactory<
         Assert.NotEmpty(resultBytes);
     }
 
+    [Fact]
+    public async Task DownloadResult_RemovesWorkingDirectory_AfterCompletedJob()
+    {
+        using var factory = _factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureTestServices(services =>
+            {
+                services.AddScoped<IEngineGateway, FakeEngineGateway>();
+            });
+        });
+
+        using var client = factory.CreateClient();
+        using var content = new MultipartFormDataContent();
+
+        var fileBytes = new byte[] { 137, 80, 78, 71 };
+        var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+
+        content.Add(fileContent, "file", "cleanup.png");
+        content.Add(new StringContent("realesrgan"), "engine");
+        content.Add(new StringContent("{\"tile\":128}"), "options");
+
+        using var createResponse = await client.PostAsync("/api/image/jobs", content);
+        var createBody = await createResponse.Content.ReadAsStringAsync();
+        using var createJson = JsonDocument.Parse(createBody);
+        var jobId = createJson.RootElement.GetProperty("jobId").GetString();
+
+        Assert.NotNull(jobId);
+
+        using var statusResponse = await WaitForStatusAsync(client, jobId!, "Completed", TimeSpan.FromSeconds(10));
+        var statusBody = await statusResponse.Content.ReadAsStringAsync();
+        using var statusJson = JsonDocument.Parse(statusBody);
+        Assert.Equal("Completed", statusJson.RootElement.GetProperty("status").GetString());
+
+        using var resultResponse = await client.GetAsync($"/api/image/jobs/{jobId}/result");
+        Assert.Equal(HttpStatusCode.OK, resultResponse.StatusCode);
+
+        using var scope = factory.Services.CreateScope();
+        var store = scope.ServiceProvider.GetRequiredService<IImageProcessingJobStore>();
+        var job = await store.GetByIdAsync(jobId!);
+        Assert.NotNull(job);
+        Assert.False(string.IsNullOrWhiteSpace(job!.WorkingDirectory));
+
+        var deleted = await WaitUntilDeleted(job.WorkingDirectory!, CleanupTimeout);
+        Assert.True(deleted, "Expected job working directory to be removed after result download.");
+    }
+
+    [Fact]
+    public async Task DownloadResult_UsesOutputExtensionForContentType()
+    {
+        FakeEngineGateway.OutputExtension = ".jpg";
+
+        try
+        {
+            using var factory = _factory.WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureTestServices(services =>
+                {
+                    services.AddScoped<IEngineGateway, FakeEngineGateway>();
+                });
+            });
+
+            using var client = factory.CreateClient();
+            using var content = new MultipartFormDataContent();
+
+            var fileBytes = new byte[] { 137, 80, 78, 71 };
+            var fileContent = new ByteArrayContent(fileBytes);
+            fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+
+            content.Add(fileContent, "file", "content-type.png");
+            content.Add(new StringContent("realesrgan"), "engine");
+            content.Add(new StringContent("{\"tile\":128}"), "options");
+
+            using var createResponse = await client.PostAsync("/api/image/jobs", content);
+            var createBody = await createResponse.Content.ReadAsStringAsync();
+            using var createJson = JsonDocument.Parse(createBody);
+            var jobId = createJson.RootElement.GetProperty("jobId").GetString();
+
+            Assert.NotNull(jobId);
+            using var statusResponse = await WaitForStatusAsync(client, jobId!, "Completed", TimeSpan.FromSeconds(10));
+            Assert.Equal(HttpStatusCode.OK, statusResponse.StatusCode);
+
+            using var resultResponse = await client.GetAsync($"/api/image/jobs/{jobId}/result");
+            Assert.Equal(HttpStatusCode.OK, resultResponse.StatusCode);
+            Assert.Equal("image/jpeg", resultResponse.Content.Headers.ContentType?.MediaType);
+        }
+        finally
+        {
+            FakeEngineGateway.OutputExtension = ".png";
+        }
+    }
+
     private sealed class FakeEngineGateway : IEngineGateway
     {
         private static readonly object Sync = new();
         public static string? LastOutputPath { get; private set; }
+        public static string OutputExtension { get; set; } = ".png";
 
         public static void Reset()
         {
             lock (Sync)
             {
                 LastOutputPath = null;
+                OutputExtension = ".png";
             }
         }
 
         public async Task<EngineProcessResult> ProcessAsync(EngineProcessRequest request, CancellationToken cancellationToken = default)
         {
             Directory.CreateDirectory(request.OutputDirectory);
-            var outputPath = Path.Combine(request.OutputDirectory, "output.png");
+            var outputPath = Path.Combine(request.OutputDirectory, $"output{OutputExtension}");
             await File.WriteAllBytesAsync(outputPath, [137, 80, 78, 71], cancellationToken);
 
             lock (Sync)

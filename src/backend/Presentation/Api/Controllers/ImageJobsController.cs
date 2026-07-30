@@ -77,6 +77,7 @@ public sealed class ImageJobsController : ControllerBase
             ContentType = request.File.ContentType,
             OptionsJson = request.Options,
             InputPath = inputPath,
+            WorkingDirectory = tempRoot,
             Progress = 0
         };
 
@@ -135,24 +136,19 @@ public sealed class ImageJobsController : ControllerBase
         var downloadName = ResolveDownloadName(job.OriginalFileName, job.OutputPath);
 
         var stream = System.IO.File.OpenRead(job.OutputPath);
-        RegisterCleanupOnCompleted(job.OutputPath);
+        RegisterCleanupOnCompleted(job.WorkingDirectory);
         return File(stream, contentType, downloadName);
     }
 
-    private static string ResolveContentType(string? contentType, string outputPath)
+    private static string ResolveContentType(string? contentType, string? outputPath)
     {
-        if (!string.IsNullOrWhiteSpace(contentType))
-        {
-            return contentType;
-        }
-
-        var extension = Path.GetExtension(outputPath).ToLowerInvariant();
+        var extension = Path.GetExtension(outputPath ?? string.Empty).ToLowerInvariant();
         return extension switch
         {
             ".jpg" or ".jpeg" => "image/jpeg",
             ".png" => "image/png",
             ".webp" => "image/webp",
-            _ => "application/octet-stream"
+            _ => !string.IsNullOrWhiteSpace(contentType) ? contentType : "application/octet-stream"
         };
     }
 
@@ -196,21 +192,15 @@ public sealed class ImageJobsController : ControllerBase
         return StatusCode(statusCode, problem);
     }
 
-    private void RegisterCleanupOnCompleted(string outputPath)
+    private void RegisterCleanupOnCompleted(string? workingDirectory)
     {
         HttpContext.Response.OnCompleted(() =>
         {
             try
             {
-                if (System.IO.File.Exists(outputPath))
+                if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
                 {
-                    System.IO.File.Delete(outputPath);
-                }
-
-                var parentDirectory = Path.GetDirectoryName(outputPath);
-                if (!string.IsNullOrWhiteSpace(parentDirectory) && Directory.Exists(parentDirectory))
-                {
-                    Directory.Delete(parentDirectory, recursive: true);
+                    Directory.Delete(workingDirectory, recursive: true);
                 }
             }
             catch
